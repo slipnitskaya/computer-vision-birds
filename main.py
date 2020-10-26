@@ -6,8 +6,8 @@ import torch.utils.data as td
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
-from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 
 
 def main():
@@ -20,7 +20,7 @@ def main():
     num_epochs = 100
     num_workers = 8
     random_seed = 42
-    learning_rate = 1e-2
+    learning_rate = 1e-3
     log_step = 20
 
     # prepare dataset
@@ -28,9 +28,11 @@ def main():
     ds = tv.datasets.ImageFolder(in_dir, transform=transforms)
 
     splits = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=random_seed)
-    idx_train, idx_test = next(splits.split(np.zeros(len(ds)), ds.targets))
+    idx_train, idx_temp = next(splits.split(np.zeros(len(ds)), ds.targets))
     splits = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=random_seed)
-    idx_val, idx_test = next(splits.split(np.zeros(len(idx_test)), [ds.targets[idx] for idx in idx_test]))
+    idx_val, idx_test = next(splits.split(np.zeros(len(idx_temp)), [ds.targets[idx] for idx in idx_temp]))
+    idx_val = idx_temp[idx_val]
+    idx_test = idx_temp[idx_test]
 
     train_loader = td.DataLoader(
         dataset=ds, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=num_workers
@@ -129,7 +131,7 @@ def main():
 
     # save summary results
     fig, ax = plt.subplots(2, 1, figsize=(8, 4))
-    plt.suptitle('Model performance. Test accuracy: {:.2f}'.format(test_acc))
+    plt.suptitle('Model performance. Test accuracy: {:.2f}.'.format(test_acc))
     ax[0].plot(train_loss_avg, label='training')
     ax[0].plot(val_loss_avg, label='validation')
     ax[1].plot(train_acc_avg)
@@ -139,6 +141,21 @@ def main():
     ax[1].set_xlabel('epochs')
     ax[0].legend()
     plt.savefig(f'{out_dir}/performance.png', bbox_inches='tight')
+    plt.close(fig)
+
+    cm = confusion_matrix(y_true=gt, y_pred=pred, labels=range(len(set(ds.classes))))
+    cm_nodiag = cm * ~np.eye(*cm.shape, dtype=bool)
+    confused_ids = cm_nodiag.sum(-1) == cm_nodiag.sum(-1).max()
+    cm_confused = cm[confused_ids][:, confused_ids] + cm[confused_ids, confused_ids]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    hm = ConfusionMatrixDisplay(cm_confused, display_labels=np.array(ds.classes)[confused_ids])
+    hm = hm.plot(include_values=False, ax=ax, cmap='Blues', xticks_rotation=90)
+    hm.im_.set_clim(0, 1)
+    plt.title(f'Most confused classes: {len(cm_confused)}.', fontsize=18)
+    plt.ylabel('Actual', fontsize=14)
+    plt.xlabel('Confused', fontsize=14)
+    plt.savefig(f'{out_dir}/confmatrix.png', bbox_inches='tight')
     plt.close(fig)
 
 
