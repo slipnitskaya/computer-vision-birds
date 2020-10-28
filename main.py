@@ -10,6 +10,26 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 
 
+class Attention(torch.nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernel_size, padding):
+        super(Attention, self).__init__()
+
+        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1,
+                                     padding=padding, dilation=1, groups=1, bias=True, padding_mode='zeros')
+        self.bn = torch.nn.BatchNorm2d(out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
+        self.relu = torch.nn.ReLU()
+
+    def forward(self, inputs):
+        x, output_size = inputs
+        x = F.adaptive_max_pool2d(x, output_size=output_size)
+        x = self.conv1(x)
+        x = self.bn(x)
+        x = self.relu(x)
+
+        return x
+
+
 class ResNet18(torch.nn.Module):
 
     def __init__(self, num_classes=200, pretrained=False):
@@ -26,6 +46,46 @@ class ResNet18(torch.nn.Module):
         self.net = net
 
     def forward(self, x):
+        return self.net(x)
+
+
+class ResNet18Attention(ResNet18):
+
+    def __init__(self, num_classes=200, pretrained=True, use_attention=True):
+        super(ResNet18Attention, self).__init__(num_classes=num_classes, pretrained=pretrained)
+
+        self.use_attention = use_attention
+
+        if use_attention:
+            self.att1 = Attention(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1)
+            self.att2 = Attention(in_channels=64, out_channels=128, kernel_size=(3, 3), padding=1)
+            self.att3 = Attention(in_channels=128, out_channels=256, kernel_size=(3, 3), padding=1)
+            self.att4 = Attention(in_channels=256, out_channels=512, kernel_size=(3, 3), padding=1)
+
+    def forward(self, x):
+        if self.use_attention:
+            return self._forward_attn(x)
+        else:
+            return self._forward(x)
+
+    def _forward(self, x):
+        x = self.net.conv1(x)
+        x = self.net.bn1(x)
+        x = self.net.relu(x)
+        x = self.net.maxpool(x)
+
+        x = self.net.layer1(x)
+        x = self.net.layer2(x)
+        x = self.net.layer3(x)
+        x = self.net.layer4(x)
+
+        x = self.net.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.net.fc(x)
+
+        return x
+
+    def _forward_attn(self, x):
         x = self.net.conv1(x)
         x = self.net.bn1(x)
         x = self.net.relu(x)
@@ -33,11 +93,19 @@ class ResNet18(torch.nn.Module):
 
         x_a = x.clone()
         x = self.net.layer1(x)
-        x = x * self.att(x_a, x.shape[-2:])
+        x = x * self.att1((x_a, x.shape[-2:]))
 
+        x_a = x.clone()
         x = self.net.layer2(x)
+        x = x * self.att2((x_a, x.shape[-2:]))
+
+        x_a = x.clone()
         x = self.net.layer3(x)
+        x = x * self.att3((x_a, x.shape[-2:]))
+
+        x_a = x.clone()
         x = self.net.layer4(x)
+        x = x * self.att4((x_a, x.shape[-2:]))
 
         x = self.net.avgpool(x)
         x = torch.flatten(x, 1)
