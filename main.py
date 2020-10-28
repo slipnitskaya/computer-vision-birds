@@ -10,6 +10,42 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 
 
+class ResNet18(torch.nn.Module):
+
+    def __init__(self, num_classes=200, pretrained=False):
+        super(ResNet18, self).__init__()
+
+        net = tv.models.resnet18(pretrained=pretrained)
+
+        net.fc = torch.nn.Linear(
+            in_features=net.fc.in_features,
+            out_features=num_classes,
+            bias=True
+        )
+
+        self.net = net
+
+    def forward(self, x):
+        x = self.net.conv1(x)
+        x = self.net.bn1(x)
+        x = self.net.relu(x)
+        x = self.net.maxpool(x)
+
+        x_a = x.clone()
+        x = self.net.layer1(x)
+        x = x * self.att(x_a, x.shape[-2:])
+
+        x = self.net.layer2(x)
+        x = self.net.layer3(x)
+        x = self.net.layer4(x)
+
+        x = self.net.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.net.fc(x)
+
+        return x
+
+
 def main():
     in_dir = 'data/CUB_200_2011/images'
     out_dir = 'results'
@@ -17,11 +53,12 @@ def main():
 
     # define setups
     batch_size = 128
-    num_epochs = 100
+    num_epochs = 50
     num_workers = 8
     random_seed = 42
-    learning_rate = 1e-3
     log_step = 20
+    learning_rate = 1e-3
+    pretrained = False
 
     # prepare dataset
     transforms = tv.transforms.Compose([tv.transforms.Resize(size=(224, 224)), tv.transforms.ToTensor()])
@@ -45,7 +82,7 @@ def main():
     )
 
     # setup the model
-    model = tv.models.resnet18(num_classes=len(ds.classes)).to(device)
+    model = ResNet18(num_classes=len(ds.classes), pretrained=pretrained).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # train and validate the model
@@ -148,14 +185,18 @@ def main():
     confused_ids = cm_nodiag.sum(-1) == cm_nodiag.sum(-1).max()
     cm_confused = cm[confused_ids][:, confused_ids] + cm[confused_ids, confused_ids]
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    hm = ConfusionMatrixDisplay(cm_confused, display_labels=np.array(ds.classes)[confused_ids])
+    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    hm = ConfusionMatrixDisplay(cm_confused, [l.split('.')[-1] for l in np.array(ds.classes)[confused_ids]])
     hm = hm.plot(include_values=False, ax=ax, cmap='Blues', xticks_rotation=90)
-    hm.im_.set_clim(0, 1)
-    plt.title(f'Most confused classes: {len(cm_confused)}.', fontsize=18)
-    plt.ylabel('Actual', fontsize=14)
-    plt.xlabel('Confused', fontsize=14)
-    plt.savefig(f'{out_dir}/confmatrix.png', bbox_inches='tight')
+    num_confused = np.sum(confused_ids).item()
+    if num_confused > 25:
+        plt.xticks(range(0, num_confused), [])
+        plt.yticks(range(0, num_confused), [])
+        hm.im_.set_clim(0, 1)
+    plt.title(f'Most confused classes: {num_confused}.', fontsize=14)
+    plt.ylabel('Actual', fontsize=12)
+    plt.xlabel('Confused', fontsize=12)
+    plt.savefig(f'{out_dir}/confmatrix{"_norm" if num_confused > 25 else ""}.png', bbox_inches='tight')
     plt.close(fig)
 
 
