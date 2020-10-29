@@ -130,29 +130,41 @@ def main():
     pretrained = False
 
     # prepare dataset
-    transforms = tv.transforms.Compose([tv.transforms.Resize(size=(224, 224)), tv.transforms.ToTensor()])
-    ds = tv.datasets.ImageFolder(in_dir, transform=transforms)
+    transforms_train = tv.transforms.Compose([
+        tv.transforms.RandomResizedCrop(256),
+        tv.transforms.ToTensor(),
+        tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    transforms_eval = tv.transforms.Compose([
+        tv.transforms.CenterCrop(256),
+        tv.transforms.ToTensor(),
+        tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    ds_train = tv.datasets.ImageFolder(in_dir, transform=transforms_train)
+    ds_eval = tv.datasets.ImageFolder(in_dir, transform=transforms_eval)
 
     splits = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=random_seed)
-    idx_train, idx_temp = next(splits.split(np.zeros(len(ds)), ds.targets))
+    idx_train, idx_temp = next(splits.split(np.zeros(len(ds_train)), ds_train.targets))
     splits = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=random_seed)
-    idx_val, idx_test = next(splits.split(np.zeros(len(idx_temp)), [ds.targets[idx] for idx in idx_temp]))
+    idx_val, idx_test = next(splits.split(np.zeros(len(idx_temp)), [ds_train.targets[idx] for idx in idx_temp]))
     idx_val = idx_temp[idx_val]
     idx_test = idx_temp[idx_test]
 
     train_loader = td.DataLoader(
-        dataset=ds, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=num_workers
+        dataset=ds_train, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=num_workers
     )
     val_loader = td.DataLoader(
-        dataset=ds, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=num_workers
+        dataset=ds_eval, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=num_workers
     )
     test_loader = td.DataLoader(
-        dataset=ds, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_test), num_workers=num_workers
+        dataset=ds_eval, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_test), num_workers=num_workers
     )
 
-    # setup the model
-    model = ResNet18(num_classes=len(ds.classes), pretrained=pretrained).to(device)
+    # instantiate the model
+    model = ResNet18(num_classes=len(ds_train.classes), pretrained=pretrained).to(device)
+    # instantiate optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
     # train and validate the model
     train_loss_avg = list()
@@ -218,6 +230,8 @@ def main():
             val_loss_avg.append(np.mean(val_loss))
             val_acc_avg.append(np.mean(val_acc))
 
+        scheduler.step()
+
     # test the model
     gt = list()
     pred = list()
@@ -249,14 +263,15 @@ def main():
     plt.savefig(f'{out_dir}/performance.png', bbox_inches='tight')
     plt.close(fig)
 
-    cm = confusion_matrix(y_true=gt, y_pred=pred, labels=range(len(set(ds.classes))))
+    cm = confusion_matrix(y_true=gt, y_pred=pred, labels=range(len(set(ds_train.classes))))
     cm_nodiag = cm * ~np.eye(*cm.shape, dtype=bool)
     confused_ids = cm_nodiag.sum(-1) == cm_nodiag.sum(-1).max()
     cm_confused = cm[confused_ids][:, confused_ids] + cm[confused_ids, confused_ids]
-    labels_confused = [l.split('.')[-1].replace('_', ' ') for l in np.array(ds.classes)[confused_ids]]
+    labels_confused = [l.split('.')[-1].replace('_', ' ') for l in np.array(ds_train.classes)[confused_ids]]
+
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
     hm = ConfusionMatrixDisplay(cm_confused, labels_confused)
-    hm.plot(include_values=True, cmap='Blues', xticks_rotation=90, values_format='.3f', ax=ax)
+    hm.plot(include_values=True, cmap='Blues', xticks_rotation=90, values_format='.1f', ax=ax)
     num_confused = np.sum(confused_ids).item()
     if num_confused > 20:
         plt.xticks(range(0, num_confused), [])
