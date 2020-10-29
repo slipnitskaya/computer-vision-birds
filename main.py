@@ -15,17 +15,18 @@ class Attention(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding):
         super(Attention, self).__init__()
 
-        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1,
-                                     padding=padding, dilation=1, groups=1, bias=True, padding_mode='zeros')
+        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=padding,
+                                     dilation=1, groups=1, bias=True, padding_mode='zeros')
         self.bn = torch.nn.BatchNorm2d(out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
-        self.relu = torch.nn.ReLU()
+        self.bn.weight.data.zero_()
+        self.activation = torch.nn.Tanh()
 
     def forward(self, inputs):
         x, output_size = inputs
         x = F.adaptive_max_pool2d(x, output_size=output_size)
         x = self.conv1(x)
         x = self.bn(x)
-        x = self.relu(x)
+        x = self.activation(x) + 1.0
 
         return x
 
@@ -236,14 +237,14 @@ def main():
 
     # save summary results
     fig, ax = plt.subplots(2, 1, figsize=(8, 4))
-    plt.suptitle('Model performance. Test accuracy: {:.2f}.'.format(test_acc))
+    plt.suptitle('Model performance. Test accuracy: {:.2f}'.format(test_acc))
     ax[0].plot(train_loss_avg, label='training')
     ax[0].plot(val_loss_avg, label='validation')
     ax[1].plot(train_acc_avg)
     ax[1].plot(val_acc_avg)
-    ax[0].set_ylabel('loss')
-    ax[1].set_ylabel('accuracy')
-    ax[1].set_xlabel('epochs')
+    ax[0].set_ylabel('Loss')
+    ax[1].set_ylabel('Accuracy')
+    ax[1].set_xlabel('Epochs')
     ax[0].legend()
     plt.savefig(f'{out_dir}/performance.png', bbox_inches='tight')
     plt.close(fig)
@@ -252,19 +253,18 @@ def main():
     cm_nodiag = cm * ~np.eye(*cm.shape, dtype=bool)
     confused_ids = cm_nodiag.sum(-1) == cm_nodiag.sum(-1).max()
     cm_confused = cm[confused_ids][:, confused_ids] + cm[confused_ids, confused_ids]
-
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    hm = ConfusionMatrixDisplay(cm_confused, [l.split('.')[-1] for l in np.array(ds.classes)[confused_ids]])
-    hm = hm.plot(include_values=False, ax=ax, cmap='Blues', xticks_rotation=90)
+    labels_confused = [l.split('.')[-1].replace('_', ' ') for l in np.array(ds.classes)[confused_ids]]
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+    hm = ConfusionMatrixDisplay(cm_confused, labels_confused)
+    hm.plot(include_values=True, cmap='Blues', xticks_rotation=90, values_format='.3f', ax=ax)
     num_confused = np.sum(confused_ids).item()
-    if num_confused > 25:
+    if num_confused > 20:
         plt.xticks(range(0, num_confused), [])
         plt.yticks(range(0, num_confused), [])
-        hm.im_.set_clim(0, 1)
-    plt.title(f'Most confused classes: {num_confused}.', fontsize=14)
-    plt.ylabel('Actual', fontsize=12)
-    plt.xlabel('Confused', fontsize=12)
-    plt.savefig(f'{out_dir}/confmatrix{"_norm" if num_confused > 25 else ""}.png', bbox_inches='tight')
+    plt.title(f'Most confused classes: {num_confused}', fontsize=14)
+    plt.ylabel('Actual classes', fontsize=12)
+    plt.xlabel('Confused classes', fontsize=12)
+    plt.savefig(f'{out_dir}/confmatrix.png', bbox_inches='tight')
     plt.close(fig)
 
 
