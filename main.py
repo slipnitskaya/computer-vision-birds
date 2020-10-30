@@ -1,13 +1,15 @@
+import os
 import tqdm
 import torch
+import pickle
+import argparse
 import numpy as np
 import torchvision as tv
 import torch.utils.data as td
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
-from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 
 
 class Attention(torch.nn.Module):
@@ -33,29 +35,18 @@ class Attention(torch.nn.Module):
 
 class ResNet18(torch.nn.Module):
 
-    def __init__(self, num_classes=200, pretrained=False):
+    def __init__(self, num_classes=200, pretrained=False, use_attention=False):
         super(ResNet18, self).__init__()
 
-        net = tv.models.resnet18(pretrained=pretrained)
+        self.use_attention = use_attention
+        self.pretrained = pretrained
 
-        net.fc = torch.nn.Linear(
-            in_features=net.fc.in_features,
+        self.net = tv.models.resnet18(pretrained=pretrained)
+        self.net.fc = torch.nn.Linear(
+            in_features=self.net.fc.in_features,
             out_features=num_classes,
             bias=True
         )
-
-        self.net = net
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class ResNet18Attention(ResNet18):
-
-    def __init__(self, num_classes=200, pretrained=True, use_attention=True):
-        super(ResNet18Attention, self).__init__(num_classes=num_classes, pretrained=pretrained)
-
-        self.use_attention = use_attention
 
         if use_attention:
             self.att1 = Attention(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1)
@@ -116,18 +107,19 @@ class ResNet18Attention(ResNet18):
 
 
 def main():
-    in_dir = 'data/CUB_200_2011/images'
-    out_dir = 'results'
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011/images')
+    parser.add_argument('-o', '--out-dir', default='results')
+    parser.add_argument('-t', '--pretrained', default=False)
+    parser.add_argument('-a', '--use-attention', default=False)
+    parser.add_argument('-b', '--batch-size', default=128)
+    parser.add_argument('-e', '--num-epochs', default=50)
+    parser.add_argument('-w', '--num-workers', default=8)
+    parser.add_argument('-s', '--save-results', default=False)
 
-    # define setups
-    batch_size = 128
-    num_epochs = 50
-    num_workers = 8
-    random_seed = 42
-    log_step = 20
-    learning_rate = 1e-3
-    pretrained = False
+    args = parser.parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
@@ -140,30 +132,31 @@ def main():
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    ds_train = tv.datasets.ImageFolder(in_dir, transform=transforms_train)
-    ds_eval = tv.datasets.ImageFolder(in_dir, transform=transforms_eval)
+    ds_train = tv.datasets.ImageFolder(args.in_dir, transform=transforms_train)
+    ds_eval = tv.datasets.ImageFolder(args.in_dir, transform=transforms_eval)
 
-    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=random_seed)
+    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     idx_train, idx_temp = next(splits.split(np.zeros(len(ds_train)), ds_train.targets))
-    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=random_seed)
+    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
     idx_val, idx_test = next(splits.split(np.zeros(len(idx_temp)), [ds_train.targets[idx] for idx in idx_temp]))
     idx_val = idx_temp[idx_val]
     idx_test = idx_temp[idx_test]
 
     train_loader = td.DataLoader(
-        dataset=ds_train, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=num_workers
+        dataset=ds_train, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=args.num_workers
     )
     val_loader = td.DataLoader(
-        dataset=ds_eval, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=num_workers
+        dataset=ds_eval, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=args.num_workers
     )
     test_loader = td.DataLoader(
-        dataset=ds_eval, batch_size=batch_size, sampler=td.SubsetRandomSampler(idx_test), num_workers=num_workers
+        dataset=ds_eval, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_test), num_workers=args.num_workers
     )
 
     # instantiate the model
-    model = ResNet18(num_classes=len(ds_train.classes), pretrained=pretrained).to(device)
+    model = ResNet18(num_classes=len(ds_train.classes), pretrained=args.pretrained, use_attention=args.use_attention).to(device)
+
     # instantiate optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
     # train and validate the model
@@ -171,7 +164,7 @@ def main():
     val_loss_avg = list()
     train_acc_avg = list()
     val_acc_avg = list()
-    for _ in tqdm.trange(num_epochs):
+    for _ in tqdm.trange(args.num_epochs):
         train_loss = list()
         train_acc = list()
         train_loss_per_batch = 0.0
@@ -194,7 +187,7 @@ def main():
             train_loss_per_batch += loss.item()
             acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
-            if (i + 1) % log_step == 0:
+            if (i + 1) % 20 == 0:
                 bar.set_description('Train loss={:.3f}'.format(loss.item()), True)
                 bar.update()
 
@@ -220,7 +213,7 @@ def main():
                 loss = F.cross_entropy(y_pred, y)
                 acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
-                if (i + 1) % log_step == 0:
+                if (i + 1) % 20 == 0:
                     bar.set_description('Valid loss={:.3f}'.format(loss.item()), True)
                     bar.update()
 
@@ -233,7 +226,7 @@ def main():
         scheduler.step()
 
     # test the model
-    gt = list()
+    true = list()
     pred = list()
     with torch.no_grad():
         for i, batch in enumerate(tqdm.tqdm(test_loader, leave=False)):
@@ -244,43 +237,20 @@ def main():
 
             y_pred = model(x)
 
-            gt.extend([val.item() for val in y])
+            true.extend([val.item() for val in y])
             pred.extend([val.item() for val in y_pred.argmax(dim=-1)])
 
-        test_acc = accuracy_score(gt, pred)
+    # save results
+    if args.save_results:
+        with open(f'{args.out_dir}/performance.pkl', 'wb') as f:
+            metrics = {
+                'train_loss': train_loss_avg, 'val_loss': val_loss_avg, 'train_acc': train_acc_avg, 'val_acc': val_acc_avg
+            }
+            pickle.dump(metrics, f, pickle.HIGHEST_PROTOCOL)
 
-    # save summary results
-    fig, ax = plt.subplots(2, 1, figsize=(8, 4))
-    plt.suptitle('Model performance. Test accuracy: {:.2f}'.format(test_acc))
-    ax[0].plot(train_loss_avg, label='training')
-    ax[0].plot(val_loss_avg, label='validation')
-    ax[1].plot(train_acc_avg)
-    ax[1].plot(val_acc_avg)
-    ax[0].set_ylabel('Loss')
-    ax[1].set_ylabel('Accuracy')
-    ax[1].set_xlabel('Epochs')
-    ax[0].legend()
-    plt.savefig(f'{out_dir}/performance.png', bbox_inches='tight')
-    plt.close(fig)
-
-    cm = confusion_matrix(y_true=gt, y_pred=pred, labels=range(len(set(ds_train.classes))))
-    cm_nodiag = cm * ~np.eye(*cm.shape, dtype=bool)
-    confused_ids = cm_nodiag.sum(-1) == cm_nodiag.sum(-1).max()
-    cm_confused = cm[confused_ids][:, confused_ids] + cm[confused_ids, confused_ids]
-    labels_confused = [l.split('.')[-1].replace('_', ' ') for l in np.array(ds_train.classes)[confused_ids]]
-
-    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-    hm = ConfusionMatrixDisplay(cm_confused, labels_confused)
-    hm.plot(include_values=True, cmap='Blues', xticks_rotation=90, values_format='.1f', ax=ax)
-    num_confused = np.sum(confused_ids).item()
-    if num_confused > 20:
-        plt.xticks(range(0, num_confused), [])
-        plt.yticks(range(0, num_confused), [])
-    plt.title(f'Most confused classes: {num_confused}', fontsize=14)
-    plt.ylabel('Actual classes', fontsize=12)
-    plt.xlabel('Confused classes', fontsize=12)
-    plt.savefig(f'{out_dir}/confmatrix.png', bbox_inches='tight')
-    plt.close(fig)
+        with open(f'{args.out_dir}/predictions.pkl', 'wb') as f:
+            predictions = {'y_true': true, 'y_pred': pred, 'labels': ds_train.classes}
+            pickle.dump(predictions, f, pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == '__main__':
