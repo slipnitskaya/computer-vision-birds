@@ -35,11 +35,17 @@ class Attention(torch.nn.Module):
 
 class ResNet18(torch.nn.Module):
 
-    def __init__(self, num_classes=200, pretrained=False, use_attention=False):
+    def __init__(self,
+                 num_classes: int = 200,
+                 pretrained: bool = False,
+                 use_attention: bool = False,
+                 grad_center: bool = False):
+
         super(ResNet18, self).__init__()
 
         self.use_attention = use_attention
         self.pretrained = pretrained
+        self.grad_center = grad_center
 
         self.net = tv.models.resnet18(pretrained=pretrained)
         self.net.fc = torch.nn.Linear(
@@ -53,6 +59,10 @@ class ResNet18(torch.nn.Module):
             self.att2 = Attention(in_channels=64, out_channels=128, kernel_size=(3, 3), padding=1)
             self.att3 = Attention(in_channels=128, out_channels=256, kernel_size=(3, 3), padding=1)
             self.att4 = Attention(in_channels=256, out_channels=512, kernel_size=(3, 3), padding=1)
+
+        if grad_center:
+            for p in self.parameters():
+                p.register_hook(lambda grad: grad - grad.mean())
 
     def forward(self, x):
         if self.use_attention:
@@ -112,6 +122,7 @@ def main():
     parser.add_argument('-o', '--out-dir', default='results')
     parser.add_argument('-t', '--pretrained', default=False)
     parser.add_argument('-a', '--use-attention', default=False)
+    parser.add_argument('-g', '--grad-center', default=False)
     parser.add_argument('-b', '--batch-size', default=128)
     parser.add_argument('-e', '--num-epochs', default=50)
     parser.add_argument('-w', '--num-workers', default=8)
@@ -123,12 +134,14 @@ def main():
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
-        tv.transforms.RandomResizedCrop(256),
+        tv.transforms.Resize(256),
+        tv.transforms.RandomResizedCrop(224),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     transforms_eval = tv.transforms.Compose([
-        tv.transforms.CenterCrop(256),
+        tv.transforms.Resize(256),
+        tv.transforms.CenterCrop(224),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -153,22 +166,28 @@ def main():
     )
 
     # instantiate the model
-    model = ResNet18(num_classes=len(ds_train.classes), pretrained=args.pretrained, use_attention=args.use_attention).to(device)
+    model = ResNet18(
+        num_classes=len(ds_train.classes),
+        pretrained=args.pretrained,
+        use_attention=args.use_attention,
+        grad_center=args.grad_center
+    ).to(device)
 
     # instantiate optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
-    # train and validate the model
     train_loss_avg = list()
-    val_loss_avg = list()
     train_acc_avg = list()
+    val_loss_avg = list()
     val_acc_avg = list()
+    log_interval = 20
     for _ in tqdm.trange(args.num_epochs):
         train_loss = list()
         train_acc = list()
         train_loss_per_batch = 0.0
         bar = tqdm.tqdm(total=len(train_loader), leave=False)
+        # train the model
         model.train()
         for i, batch in enumerate(train_loader):
             x, y = batch
@@ -187,7 +206,7 @@ def main():
             train_loss_per_batch += loss.item()
             acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
-            if (i + 1) % 20 == 0:
+            if (i + 1) % log_interval == 0:
                 bar.set_description('Train loss={:.3f}'.format(loss.item()), True)
                 bar.update()
 
@@ -197,6 +216,7 @@ def main():
         train_loss_avg.append(np.mean(train_loss))
         train_acc_avg.append(np.mean(train_acc))
 
+        # validate the model
         model.eval()
         with torch.no_grad():
             val_loss = list()
@@ -213,7 +233,7 @@ def main():
                 loss = F.cross_entropy(y_pred, y)
                 acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
-                if (i + 1) % 20 == 0:
+                if (i + 1) % log_interval == 0:
                     bar.set_description('Valid loss={:.3f}'.format(loss.item()), True)
                     bar.update()
 
@@ -240,15 +260,22 @@ def main():
             true.extend([val.item() for val in y])
             pred.extend([val.item() for val in y_pred.argmax(dim=-1)])
 
+    print(f'Test accuracy: {accuracy_score(true, pred)}')
+
     # save results
     if args.save_results:
-        with open(f'{args.out_dir}/performance.pkl', 'wb') as f:
+        exp_id = ''.join([
+            'pretrained' if model.pretrained else '',
+            'Attention' if model.use_attention else '',
+            'Grad' if model.grad_center else ''
+        ])
+        with open(f'{args.out_dir}/performance_{exp_id}.pkl', 'wb') as f:
             metrics = {
                 'train_loss': train_loss_avg, 'val_loss': val_loss_avg, 'train_acc': train_acc_avg, 'val_acc': val_acc_avg
             }
             pickle.dump(metrics, f, pickle.HIGHEST_PROTOCOL)
 
-        with open(f'{args.out_dir}/predictions.pkl', 'wb') as f:
+        with open(f'{args.out_dir}/predictions_{exp_id}.pkl', 'wb') as f:
             predictions = {'y_true': true, 'y_pred': pred, 'labels': ds_train.classes}
             pickle.dump(predictions, f, pickle.HIGHEST_PROTOCOL)
 
