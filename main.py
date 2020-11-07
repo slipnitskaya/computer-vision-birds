@@ -20,7 +20,6 @@ class Attention(torch.nn.Module):
         self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=padding,
                                      dilation=1, groups=1, bias=True, padding_mode='zeros')
         self.bn = torch.nn.BatchNorm2d(out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
-        self.bn.weight.data.zero_()
         self.activation = torch.nn.Tanh()
 
     def forward(self, inputs):
@@ -59,6 +58,16 @@ class ResNet18(torch.nn.Module):
             self.att2 = Attention(in_channels=64, out_channels=128, kernel_size=(3, 3), padding=1)
             self.att3 = Attention(in_channels=128, out_channels=256, kernel_size=(3, 3), padding=1)
             self.att4 = Attention(in_channels=256, out_channels=512, kernel_size=(3, 3), padding=1)
+
+            if pretrained:
+                self.att1.bn.weight.data.zero_()
+                self.att1.bn.bias.data.zero_()
+                self.att2.bn.weight.data.zero_()
+                self.att2.bn.bias.data.zero_()
+                self.att3.bn.weight.data.zero_()
+                self.att3.bn.bias.data.zero_()
+                self.att4.bn.weight.data.zero_()
+                self.att4.bn.bias.data.zero_()
 
         if grad_center:
             for p in self.parameters():
