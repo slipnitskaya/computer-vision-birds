@@ -125,9 +125,72 @@ class ResNet18(torch.nn.Module):
         return x
 
 
+class DatasetBirds(tv.datasets.ImageFolder):
+
+    def __init__(self,
+                 root,
+                 transform=None,
+                 target_transform=None,
+                 loader=tv.datasets.folder.default_loader,
+                 is_valid_file=None,
+                 train=True):
+
+        img_root = os.path.join(root, 'images')
+
+        super(DatasetBirds, self).__init__(
+            root=img_root,
+            transform=transform,
+            target_transform=target_transform,
+            loader=loader,
+            is_valid_file=is_valid_file,
+        )
+
+        self.train = train
+
+        path_to_splits = os.path.join(root, 'train_test_split.txt')
+        indices_to_use = list()
+        with open(path_to_splits, 'r') as in_file:
+            for line in in_file:
+                idx, use_train = line.strip('\n').split(' ', 2)
+                if bool(int(use_train)) == self.train:
+                    indices_to_use.append(int(idx))
+
+        path_to_index = os.path.join(root, 'images.txt')
+        filenames_to_use = set()
+        with open(path_to_index, 'r') as in_file:
+            for line in in_file:
+                idx, fn = line.strip('\n').split(' ', 2)
+                if int(idx) in indices_to_use:
+                    filenames_to_use.add(fn)
+
+        imgs_to_use = list()
+        for path_to_img, lb in self.imgs:
+            fn_to_exclude = None
+
+            for fn in filenames_to_use:
+                if path_to_img.endswith(fn):
+                    imgs_to_use.append((path_to_img, lb))
+                    fn_to_exclude = fn
+                    break
+
+            if fn_to_exclude is not None:
+                filenames_to_use -= {fn_to_exclude}
+
+        _, targets_to_use = list(zip(*imgs_to_use))
+
+        self.imgs = self.samples = imgs_to_use
+        self.targets = targets_to_use
+
+    def __getitem__(self, index):
+        return super(DatasetBirds, self).__getitem__(index)
+
+    def __len__(self):
+        return len(self.targets)
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011/images')
+    parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011')
     parser.add_argument('-o', '--out-dir', default='results')
     parser.add_argument('-t', '--pretrained', default=False)
     parser.add_argument('-a', '--use-attention', default=False)
@@ -143,35 +206,32 @@ def main():
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
-        tv.transforms.Resize(256),
+        tv.transforms.Resize((256, 256)),
         tv.transforms.RandomResizedCrop(224),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     transforms_eval = tv.transforms.Compose([
-        tv.transforms.Resize(256),
+        tv.transforms.Resize((256, 256)),
         tv.transforms.CenterCrop(224),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    ds_train = tv.datasets.ImageFolder(args.in_dir, transform=transforms_train)
-    ds_eval = tv.datasets.ImageFolder(args.in_dir, transform=transforms_eval)
+    ds_train = DatasetBirds(args.in_dir, transform=transforms_train, train=True)
+    ds_val = DatasetBirds(args.in_dir, transform=transforms_eval, train=True)
+    ds_test = DatasetBirds(args.in_dir, transform=transforms_eval, train=False)
 
-    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    idx_train, idx_temp = next(splits.split(np.zeros(len(ds_train)), ds_train.targets))
-    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
-    idx_val, idx_test = next(splits.split(np.zeros(len(idx_temp)), [ds_train.targets[idx] for idx in idx_temp]))
-    idx_val = idx_temp[idx_val]
-    idx_test = idx_temp[idx_test]
+    splits = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
+    idx_train, idx_val = next(splits.split(np.zeros(len(ds_train)), ds_train.targets))
 
     train_loader = td.DataLoader(
         dataset=ds_train, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=args.num_workers
     )
     val_loader = td.DataLoader(
-        dataset=ds_eval, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=args.num_workers
+        dataset=ds_val, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=args.num_workers
     )
     test_loader = td.DataLoader(
-        dataset=ds_eval, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_test), num_workers=args.num_workers
+        dataset=ds_test, batch_size=args.batch_size, num_workers=args.num_workers
     )
 
     # instantiate the model
