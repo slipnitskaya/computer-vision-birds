@@ -133,18 +133,21 @@ class DatasetBirds(tv.datasets.ImageFolder):
                  target_transform=None,
                  loader=tv.datasets.folder.default_loader,
                  is_valid_file=None,
-                 train=True):
+                 train=True,
+                 bboxes=False):
 
         img_root = os.path.join(root, 'images')
 
         super(DatasetBirds, self).__init__(
             root=img_root,
-            transform=transform,
-            target_transform=target_transform,
+            transform=None,
+            target_transform=None,
             loader=loader,
             is_valid_file=is_valid_file,
         )
 
+        self.transform_ = transform
+        self.target_transform_ = target_transform
         self.train = train
 
         path_to_splits = os.path.join(root, 'train_test_split.txt')
@@ -163,26 +166,51 @@ class DatasetBirds(tv.datasets.ImageFolder):
                 if int(idx) in indices_to_use:
                     filenames_to_use.add(fn)
 
-        imgs_to_use = list()
-        for path_to_img, lb in self.imgs:
-            fn_to_exclude = None
-
-            for fn in filenames_to_use:
-                if path_to_img.endswith(fn):
-                    imgs_to_use.append((path_to_img, lb))
-                    fn_to_exclude = fn
-                    break
-
-            if fn_to_exclude is not None:
-                filenames_to_use -= {fn_to_exclude}
+        img_paths_cut = {'/'.join(img_path.rsplit('/', 2)[-2:]): idx for idx, (img_path, lb) in enumerate(self.imgs)}
+        imgs_to_use = [self.imgs[img_paths_cut[fn]] for fn in filenames_to_use]
 
         _, targets_to_use = list(zip(*imgs_to_use))
 
         self.imgs = self.samples = imgs_to_use
         self.targets = targets_to_use
 
+        if bboxes:
+            path_to_bboxes = os.path.join(root, 'bounding_boxes.txt')
+            bounding_boxes = list()
+
+            with open(path_to_bboxes, 'r') as in_file:
+                for line in in_file:
+                    idx, x, y, w, h = map(lambda x: float(x), line.strip('\n').split(' '))
+                    if int(idx) in indices_to_use:
+                        bounding_boxes.append((x, y, w, h))
+
+            self.bboxes = bounding_boxes
+        else:
+            self.bboxes = None
+
     def __getitem__(self, index):
-        return super(DatasetBirds, self).__getitem__(index)
+        sample, target = super(DatasetBirds, self).__getitem__(index)
+
+        if self.bboxes is not None:
+            width, height = sample.width, sample.height
+            x, y, w, h = self.bboxes[index]
+
+            scale_resize = 256 / width
+            scale_resize_crop = scale_resize * (224 / 256)
+
+            x_rel = scale_resize_crop * x / 224
+            y_rel = scale_resize_crop * y / 224
+            w_rel = scale_resize_crop * w / 224
+            h_rel = scale_resize_crop * h / 224
+
+            target = torch.tensor([target, x_rel, y_rel, w_rel, h_rel])
+
+        if self.transform_ is not None:
+            sample = self.transform_(sample)
+        if self.target_transform_ is not None:
+            target = self.target_transform_(target)
+
+        return sample, target
 
     def __len__(self):
         return len(self.targets)
@@ -194,10 +222,11 @@ def main():
     parser.add_argument('-o', '--out-dir', default='results')
     parser.add_argument('-t', '--pretrained', default=False)
     parser.add_argument('-a', '--use-attention', default=False)
+    parser.add_argument('-B', '--use-bboxes', default=False)
     parser.add_argument('-g', '--grad-center', default=False)
     parser.add_argument('-b', '--batch-size', default=128)
-    parser.add_argument('-e', '--num-epochs', default=50)
-    parser.add_argument('-w', '--num-workers', default=8)
+    parser.add_argument('-e', '--num-epochs', default=1)
+    parser.add_argument('-w', '--num-workers', default=0)
     parser.add_argument('-s', '--save-results', default=False)
 
     args = parser.parse_args()
@@ -207,7 +236,7 @@ def main():
     # prepare dataset
     transforms_train = tv.transforms.Compose([
         tv.transforms.Resize((256, 256)),
-        tv.transforms.RandomResizedCrop(224),
+        tv.transforms.RandomCrop(224),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -217,18 +246,24 @@ def main():
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    ds_train = DatasetBirds(args.in_dir, transform=transforms_train, train=True)
-    ds_val = DatasetBirds(args.in_dir, transform=transforms_eval, train=True)
-    ds_test = DatasetBirds(args.in_dir, transform=transforms_eval, train=False)
+    ds_train = DatasetBirds(args.in_dir, transform=transforms_train, train=True, bboxes=args.use_bboxes)
+    ds_val = DatasetBirds(args.in_dir, transform=transforms_eval, train=True, bboxes=args.use_bboxes)
+    ds_test = DatasetBirds(args.in_dir, transform=transforms_eval, train=False, bboxes=args.use_bboxes)
 
     splits = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
     idx_train, idx_val = next(splits.split(np.zeros(len(ds_train)), ds_train.targets))
 
     train_loader = td.DataLoader(
-        dataset=ds_train, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_train), num_workers=args.num_workers
+        dataset=ds_train,
+        batch_size=args.batch_size,
+        sampler=td.SubsetRandomSampler(idx_train),
+        num_workers=args.num_workers
     )
     val_loader = td.DataLoader(
-        dataset=ds_val, batch_size=args.batch_size, sampler=td.SubsetRandomSampler(idx_val), num_workers=args.num_workers
+        dataset=ds_val,
+        batch_size=args.batch_size,
+        sampler=td.SubsetRandomSampler(idx_val),
+        num_workers=args.num_workers
     )
     test_loader = td.DataLoader(
         dataset=ds_test, batch_size=args.batch_size, num_workers=args.num_workers
@@ -236,7 +271,7 @@ def main():
 
     # instantiate the model
     model = ResNet18(
-        num_classes=len(ds_train.classes),
+        num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4,
         pretrained=args.pretrained,
         use_attention=args.use_attention,
         grad_center=args.grad_center
@@ -267,13 +302,24 @@ def main():
             optimizer.zero_grad()
 
             y_pred = model(x)
-            loss = F.cross_entropy(y_pred, y)
+
+            if args.use_bboxes:
+                loss_cls = F.cross_entropy(y_pred[..., :-4], y[..., 0].long())
+                loss_bbox = F.mse_loss(torch.sigmoid(y_pred[..., -4:]), y[..., 1:])
+                loss = loss_cls + loss_bbox
+            else:
+                loss = F.cross_entropy(y_pred, y)
 
             loss.backward()
             optimizer.step()
 
             train_loss_per_batch += loss.item()
-            acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
+
+            if args.use_bboxes:
+                acc = accuracy_score([val.item() for val in y[..., 0]],
+                                     [val.item() for val in y_pred[..., :-4].argmax(dim=-1)])
+            else:
+                acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
             if (i + 1) % log_interval == 0:
                 bar.set_description('Train loss={:.3f}'.format(loss.item()), True)
@@ -299,8 +345,15 @@ def main():
 
                 y_pred = model(x)
 
-                loss = F.cross_entropy(y_pred, y)
-                acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
+                if args.use_bboxes:
+                    loss_cls = F.cross_entropy(y_pred[..., :-4], y[..., 0].long())
+                    loss_bbox = F.mse_loss(torch.sigmoid(y_pred[..., -4:]), y[..., 1:])
+                    loss = loss_cls + loss_bbox
+                    acc = accuracy_score([val.item() for val in y[..., 0]],
+                                         [val.item() for val in y_pred[..., :-4].argmax(dim=-1)])
+                else:
+                    loss = F.cross_entropy(y_pred, y)
+                    acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
 
                 if (i + 1) % log_interval == 0:
                     bar.set_description('Valid loss={:.3f}'.format(loss.item()), True)
@@ -326,6 +379,10 @@ def main():
 
             y_pred = model(x)
 
+            if args.use_bboxes:
+                y = y[..., 0]
+                y_pred = y_pred[..., :-4]
+
             true.extend([val.item() for val in y])
             pred.extend([val.item() for val in y_pred.argmax(dim=-1)])
 
@@ -336,7 +393,8 @@ def main():
         exp_id = ''.join([
             'pretrained' if model.pretrained else '',
             'Attention' if model.use_attention else '',
-            'Grad' if model.grad_center else ''
+            'Grad' if model.grad_center else '',
+            'Box' if args.use_bboxes else ''
         ])
         with open(f'{args.out_dir}/performance_{exp_id}.pkl', 'wb') as f:
             metrics = {
