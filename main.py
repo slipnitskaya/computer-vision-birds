@@ -7,6 +7,7 @@ import numpy as np
 import torchvision as tv
 import torch.utils.data as td
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
@@ -17,15 +18,16 @@ class Attention(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding):
         super(Attention, self).__init__()
 
-        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=padding,
-                                     dilation=1, groups=1, bias=True, padding_mode='zeros')
+        self.conv_depth = torch.nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, groups=in_channels)
+        self.conv_point = torch.nn.Conv2d(out_channels, out_channels, kernel_size=(1, 1))
         self.bn = torch.nn.BatchNorm2d(out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.activation = torch.nn.Tanh()
 
     def forward(self, inputs):
         x, output_size = inputs
         x = F.adaptive_max_pool2d(x, output_size=output_size)
-        x = self.conv1(x)
+        x = self.conv_depth(x)
+        x = self.conv_point(x)
         x = self.bn(x)
         x = self.activation(x) + 1.0
 
@@ -37,14 +39,12 @@ class ResNet18(torch.nn.Module):
     def __init__(self,
                  num_classes: int = 200,
                  pretrained: bool = False,
-                 use_attention: bool = False,
-                 grad_center: bool = False):
+                 use_attention: bool = False):
 
         super(ResNet18, self).__init__()
 
         self.use_attention = use_attention
         self.pretrained = pretrained
-        self.grad_center = grad_center
 
         self.net = tv.models.resnet18(pretrained=pretrained)
         self.net.fc = torch.nn.Linear(
@@ -68,10 +68,6 @@ class ResNet18(torch.nn.Module):
                 self.att3.bn.bias.data.zero_()
                 self.att4.bn.weight.data.zero_()
                 self.att4.bn.bias.data.zero_()
-
-        if grad_center:
-            for p in self.parameters():
-                p.register_hook(lambda grad: grad - grad.mean())
 
     def forward(self, x):
         if self.use_attention:
@@ -177,7 +173,6 @@ class DatasetBirds(tv.datasets.ImageFolder):
         if bboxes:
             path_to_bboxes = os.path.join(root, 'bounding_boxes.txt')
             bounding_boxes = list()
-
             with open(path_to_bboxes, 'r') as in_file:
                 for line in in_file:
                     idx, x, y, w, h = map(lambda x: float(x), line.strip('\n').split(' '))
@@ -216,6 +211,23 @@ class DatasetBirds(tv.datasets.ImageFolder):
         return len(self.targets)
 
 
+def pad(img):
+    pad_height = max(0, 500 - img.height)
+    pad_width = max(0, 500 - img.width)
+
+    pad_top = pad_height // 2
+    pad_bottom = pad_height - pad_top
+
+    pad_left = pad_width // 2
+    pad_right = pad_width - pad_left
+
+    return TF.pad(
+        img,
+        (pad_left, pad_top, pad_right, pad_bottom),
+        fill=tuple(map(lambda x: int(round(x * 256)), (0.485, 0.456, 0.406)))
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011')
@@ -223,7 +235,6 @@ def main():
     parser.add_argument('-t', '--pretrained', default=False)
     parser.add_argument('-a', '--use-attention', default=False)
     parser.add_argument('-B', '--use-bboxes', default=False)
-    parser.add_argument('-g', '--grad-center', default=False)
     parser.add_argument('-b', '--batch-size', default=128)
     parser.add_argument('-e', '--num-epochs', default=1)
     parser.add_argument('-w', '--num-workers', default=0)
@@ -235,17 +246,18 @@ def main():
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
-        tv.transforms.Resize((256, 256)),
-        tv.transforms.RandomCrop(224),
+        tv.transforms.Lambda(pad),
+        tv.transforms.RandomCrop((375, 375)),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     transforms_eval = tv.transforms.Compose([
-        tv.transforms.Resize((256, 256)),
-        tv.transforms.CenterCrop(224),
+        tv.transforms.Lambda(pad),
+        tv.transforms.CenterCrop((375, 375)),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
+
     ds_train = DatasetBirds(args.in_dir, transform=transforms_train, train=True, bboxes=args.use_bboxes)
     ds_val = DatasetBirds(args.in_dir, transform=transforms_eval, train=True, bboxes=args.use_bboxes)
     ds_test = DatasetBirds(args.in_dir, transform=transforms_eval, train=False, bboxes=args.use_bboxes)
@@ -273,8 +285,7 @@ def main():
     model = ResNet18(
         num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4,
         pretrained=args.pretrained,
-        use_attention=args.use_attention,
-        grad_center=args.grad_center
+        use_attention=args.use_attention
     ).to(device)
 
     # instantiate optimizer and scheduler
@@ -386,19 +397,21 @@ def main():
             true.extend([val.item() for val in y])
             pred.extend([val.item() for val in y_pred.argmax(dim=-1)])
 
-    print(f'Test accuracy: {accuracy_score(true, pred)}')
+    print('Test accuracy: {:.3f}'.format(accuracy_score(true, pred)))
 
     # save results
     if args.save_results:
         exp_id = ''.join([
-            'pretrained' if model.pretrained else '',
+            'Pretrained' if model.pretrained else 'Baseline',
             'Attention' if model.use_attention else '',
-            'Grad' if model.grad_center else '',
             'Box' if args.use_bboxes else ''
         ])
         with open(f'{args.out_dir}/performance_{exp_id}.pkl', 'wb') as f:
             metrics = {
-                'train_loss': train_loss_avg, 'val_loss': val_loss_avg, 'train_acc': train_acc_avg, 'val_acc': val_acc_avg
+                'train_loss': train_loss_avg,
+                'val_loss': val_loss_avg,
+                'train_acc': train_acc_avg,
+                'val_acc': val_acc_avg
             }
             pickle.dump(metrics, f, pickle.HIGHEST_PROTOCOL)
 
