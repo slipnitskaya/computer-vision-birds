@@ -190,13 +190,13 @@ class DatasetBirds(tv.datasets.ImageFolder):
             width, height = sample.width, sample.height
             x, y, w, h = self.bboxes[index]
 
-            scale_resize = 256 / width
-            scale_resize_crop = scale_resize * (224 / 256)
+            scale_resize = 500 / width
+            scale_resize_crop = scale_resize * (375 / 500)
 
-            x_rel = scale_resize_crop * x / 224
-            y_rel = scale_resize_crop * y / 224
-            w_rel = scale_resize_crop * w / 224
-            h_rel = scale_resize_crop * h / 224
+            x_rel = scale_resize_crop * x / 375
+            y_rel = scale_resize_crop * y / 375
+            w_rel = scale_resize_crop * w / 375
+            h_rel = scale_resize_crop * h / 375
 
             target = torch.tensor([target, x_rel, y_rel, w_rel, h_rel])
 
@@ -247,7 +247,11 @@ def main():
     # prepare dataset
     transforms_train = tv.transforms.Compose([
         tv.transforms.Lambda(pad),
-        tv.transforms.RandomCrop((375, 375)),
+        tv.transforms.RandomOrder([
+            tv.transforms.RandomCrop((375, 375)),
+            tv.transforms.RandomHorizontalFlip(),
+            tv.transforms.RandomVerticalFlip()
+        ]),
         tv.transforms.ToTensor(),
         tv.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
