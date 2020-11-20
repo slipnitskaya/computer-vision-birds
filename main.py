@@ -147,6 +147,10 @@ class ResNet50(ResNet):
     weights_loader = staticmethod(tv.models.resnet50)
 
 
+class ResNet50AttentionKD(KnowledgeDistillationMixin, ResNetAttention):
+    weights_loader = staticmethod(tv.models.resnet50)
+
+
 class DatasetBirds(tv.datasets.ImageFolder):
 
     def __init__(self,
@@ -254,21 +258,31 @@ def pad(img):
     )
 
 
+def cross_entropy(pred, target):
+    return -(target * torch.log(pred)).sum(dim=1).mean()
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011')
     parser.add_argument('-o', '--out-dir', default='results')
+    parser.add_argument('-p', '--path-to-teacher', default=None)
     parser.add_argument('-t', '--pretrained', default=False)
     parser.add_argument('-b', '--batch-size', default=128)
     parser.add_argument('-e', '--num-epochs', default=1)
     parser.add_argument('-w', '--num-workers', default=0)
     parser.add_argument('-B', '--use-bboxes', default=False)
+    parser.add_argument('-B', '--use-kd', default=False)
     parser.add_argument('-s', '--save-results', default=False)
-
+    
     args = parser.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     exp_id = ''.join(['Pretrained' if args.pretrained else 'Baseline', 'Box' if args.use_bboxes else ''])
+    log_interval = 20
+    bbox_loss_alpha = 1
+    kd_alpha = 0.2
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
@@ -312,9 +326,17 @@ def main():
     )
 
     # instantiate the model
-    model = ResNet50(
-        num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4, pretrained=args.pretrained
-    ).to(device)
+    if args.use_kd and args.path_to_teacher is not None:
+        model = ResNet50AttentionKD(
+            path_to_teacher_weights=args.path_to_teacher, num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4
+        ).to(device)
+    else:
+        model = ResNet50(
+            num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4
+        ).to(device)
+
+    if hasattr(model, 'teacher'):
+        model.teacher.to(model.teacher_device)
 
     # instantiate optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -324,7 +346,6 @@ def main():
     train_acc_avg = list()
     val_loss_avg = list()
     val_acc_avg = list()
-    log_interval = 20
 
     # use the best model snapshot
     best_snapshot_path = None
@@ -349,11 +370,41 @@ def main():
             y_pred = model(x)
 
             if args.use_bboxes:
-                loss_cls = F.cross_entropy(y_pred[..., :-4], y[..., 0].long())
-                loss_bbox = F.mse_loss(torch.sigmoid(y_pred[..., -4:]), y[..., 1:])
-                loss = loss_cls + loss_bbox
+                y_pred_cls = y_pred[..., :-4]
+                y_cls = y[..., 0].long()
+                y_pred_bbox = y_pred[..., -4:]
+                y_bbox = y[..., 1:]
             else:
-                loss = F.cross_entropy(y_pred, y)
+                y_pred_cls = y_pred
+                y_cls = y
+
+            if hasattr(model, 'teacher'):
+                y_pred_cls = torch.softmax(y_pred_cls, dim=-1)
+
+                teacher_pred = model.teacher(x.to(model.teacher_device))
+
+                if args.use_bboxes:
+                    teacher_pred_cls = teacher_pred[..., :-4]
+                    teacher_pred_bbox = teacher_pred[..., -4:]
+
+                    y_pred_bbox = kd_alpha * teacher_pred_bbox.to(x.device) + (1 - kd_alpha) * y_pred_bbox
+                else:
+                    teacher_pred_cls = teacher_pred
+
+                teacher_pred_cls = torch.softmax(teacher_pred_cls, dim=-1)
+                y_true_cls = F.one_hot(y_cls.to(model.teacher_device), teacher_pred_cls.shape[-1])
+                y_new_cls = kd_alpha * teacher_pred_cls + (1 - kd_alpha) * y_true_cls
+                y_new_cls = y_new_cls.to(x.device)
+
+                loss_cls = cross_entropy(y_pred_cls, y_new_cls)
+            else:
+                loss_cls = F.cross_entropy(y_pred_cls, y_cls)
+
+            if args.use_bboxes:
+                loss_bbox = F.mse_loss(torch.sigmoid(y_pred_bbox), y_bbox)
+                loss = loss_cls + bbox_loss_alpha * loss_bbox
+            else:
+                loss = loss_cls
 
             loss.backward()
             optimizer.step()
@@ -421,6 +472,10 @@ def main():
                 torch.save(model.state_dict(), best_snapshot_path)
 
         scheduler.step()
+
+    if args.use_snapbest and best_snapshot_path is not None:
+        state_dict = torch.load(best_snapshot_path, map_location=device)
+        model.load_state_dict(state_dict)
 
     # test the model
     true = list()
