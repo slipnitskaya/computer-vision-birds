@@ -1,4 +1,5 @@
 import os
+import copy
 import tqdm
 import torch
 import pickle
@@ -9,6 +10,7 @@ import torch.utils.data as td
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 
+from typing import cast, Tuple, Iterator
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
@@ -34,65 +36,52 @@ class Attention(torch.nn.Module):
         return x
 
 
-class ResNet18(torch.nn.Module):
+class ResNet(torch.nn.Module):
 
-    def __init__(self,
-                 num_classes: int = 200,
-                 pretrained: bool = False,
-                 use_attention: bool = False):
+    @staticmethod
+    def weights_loader(*args, **kwargs):
+        raise NotImplementedError
 
-        super(ResNet18, self).__init__()
+    def __init__(self, num_classes=200, pretrained=True):
+        super(ResNet, self).__init__()
 
-        self.use_attention = use_attention
+        net = self.weights_loader(pretrained=pretrained)
+        self.num_classes = num_classes
         self.pretrained = pretrained
 
-        self.net = tv.models.resnet18(pretrained=pretrained)
-        self.net.fc = torch.nn.Linear(
-            in_features=self.net.fc.in_features,
+        net.fc = torch.nn.Linear(
+            in_features=net.fc.in_features,
             out_features=num_classes,
-            bias=True
+            bias=net.fc.bias is not None
         )
 
-        if use_attention:
-            self.att1 = Attention(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1)
-            self.att2 = Attention(in_channels=64, out_channels=128, kernel_size=(3, 3), padding=1)
-            self.att3 = Attention(in_channels=128, out_channels=256, kernel_size=(3, 3), padding=1)
-            self.att4 = Attention(in_channels=256, out_channels=512, kernel_size=(3, 3), padding=1)
-
-            if pretrained:
-                self.att1.bn.weight.data.zero_()
-                self.att1.bn.bias.data.zero_()
-                self.att2.bn.weight.data.zero_()
-                self.att2.bn.bias.data.zero_()
-                self.att3.bn.weight.data.zero_()
-                self.att3.bn.bias.data.zero_()
-                self.att4.bn.weight.data.zero_()
-                self.att4.bn.bias.data.zero_()
+        self.net = net
 
     def forward(self, x):
-        if self.use_attention:
-            return self._forward_attn(x)
-        else:
-            return self._forward(x)
+        return self.net(x)
 
-    def _forward(self, x):
-        x = self.net.conv1(x)
-        x = self.net.bn1(x)
-        x = self.net.relu(x)
-        x = self.net.maxpool(x)
 
-        x = self.net.layer1(x)
-        x = self.net.layer2(x)
-        x = self.net.layer3(x)
-        x = self.net.layer4(x)
+class ResNetAttention(ResNet):
 
-        x = self.net.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.net.fc(x)
+    def __init__(self, num_classes: int = 200, pretrained: bool = True):
+        super(ResNetAttention, self).__init__(num_classes=num_classes, pretrained=pretrained)
 
-        return x
+        self.att1 = Attention(in_channels=64, out_channels=64, kernel_size=(3, 5), padding=(1, 2))
+        self.att2 = Attention(in_channels=64, out_channels=128, kernel_size=(5, 3), padding=(2, 1))
+        self.att3 = Attention(in_channels=128, out_channels=256, kernel_size=(3, 5), padding=(1, 2))
+        self.att4 = Attention(in_channels=256, out_channels=512, kernel_size=(5, 3), padding=(2, 1))
 
-    def _forward_attn(self, x):
+        if pretrained:
+            self.att1.bn.weight.data.zero_()
+            self.att1.bn.bias.data.zero_()
+            self.att2.bn.weight.data.zero_()
+            self.att2.bn.bias.data.zero_()
+            self.att3.bn.weight.data.zero_()
+            self.att3.bn.bias.data.zero_()
+            self.att4.bn.weight.data.zero_()
+            self.att4.bn.bias.data.zero_()
+
+    def forward(self, x):
         x = self.net.conv1(x)
         x = self.net.bn1(x)
         x = self.net.relu(x)
@@ -119,6 +108,43 @@ class ResNet18(torch.nn.Module):
         x = self.net.fc(x)
 
         return x
+
+
+class KnowledgeDistillationMixin(object):
+
+    def __init__(self, path_to_teacher_weights: str, *args, **kwargs):
+        super(KnowledgeDistillationMixin, self).__init__(*args, **kwargs)
+
+        self.net: torch.nn.Module
+
+        teacher_weights = torch.load(path_to_teacher_weights, map_location='cpu')
+        self.teacher_device = torch.device('cuda:1' if torch.cuda.device_count() > 1 else 'cpu')
+        self.teacher: torch.nn.Module = cast(torch.nn.Module, copy.deepcopy(self))
+        self.teacher.load_state_dict(teacher_weights, strict=False)
+
+        self.net.old_fc = self.teacher.net.fc
+        self.net.fc = torch.nn.Identity()
+
+    def named_parameters(self, prefix: str = '', recurse: bool = True) -> Iterator[Tuple[str, torch.nn.Parameter]]:
+        for n, p in super().named_parameters(prefix=prefix, recurse=recurse):
+            if not n.startswith('teacher.'):
+                yield n, p
+
+    def parameters(self, recurse: bool = True) -> Iterator[torch.nn.Parameter]:
+        for n, p in self.named_parameters(recurse=recurse):
+            yield p
+
+    def forward(self, x):
+        dev = x.device
+
+        x = super().forward(x)
+        x = self.net.old_fc(x.to(self.teacher_device)).to(dev)
+
+        return x
+
+
+class ResNet50(ResNet):
+    weights_loader = staticmethod(tv.models.resnet50)
 
 
 class DatasetBirds(tv.datasets.ImageFolder):
@@ -233,16 +259,16 @@ def main():
     parser.add_argument('-i', '--in-dir', default='data/CUB_200_2011')
     parser.add_argument('-o', '--out-dir', default='results')
     parser.add_argument('-t', '--pretrained', default=False)
-    parser.add_argument('-a', '--use-attention', default=False)
-    parser.add_argument('-B', '--use-bboxes', default=False)
     parser.add_argument('-b', '--batch-size', default=128)
     parser.add_argument('-e', '--num-epochs', default=1)
     parser.add_argument('-w', '--num-workers', default=0)
+    parser.add_argument('-B', '--use-bboxes', default=False)
     parser.add_argument('-s', '--save-results', default=False)
 
     args = parser.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    exp_id = ''.join(['Pretrained' if args.pretrained else 'Baseline', 'Box' if args.use_bboxes else ''])
 
     # prepare dataset
     transforms_train = tv.transforms.Compose([
@@ -286,10 +312,8 @@ def main():
     )
 
     # instantiate the model
-    model = ResNet18(
-        num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4,
-        pretrained=args.pretrained,
-        use_attention=args.use_attention
+    model = ResNet50(
+        num_classes=len(ds_train.classes) + int(args.use_bboxes) * 4, pretrained=args.pretrained
     ).to(device)
 
     # instantiate optimizer and scheduler
@@ -301,13 +325,19 @@ def main():
     val_loss_avg = list()
     val_acc_avg = list()
     log_interval = 20
-    for _ in tqdm.trange(args.num_epochs):
+
+    # use the best model snapshot
+    best_snapshot_path = None
+    best_val_acc = -1.0
+
+    for epoch in tqdm.trange(args.num_epochs):
+
+        # train the model
+        model.train()
         train_loss = list()
         train_acc = list()
         train_loss_per_batch = 0.0
         bar = tqdm.tqdm(total=len(train_loader), leave=False)
-        # train the model
-        model.train()
         for i, batch in enumerate(train_loader):
             x, y = batch
 
@@ -348,10 +378,10 @@ def main():
 
         # validate the model
         model.eval()
+        val_loss = list()
+        val_acc = list()
+        bar = tqdm.tqdm(total=len(val_loader), leave=False)
         with torch.no_grad():
-            val_loss = list()
-            val_acc = list()
-            bar = tqdm.tqdm(total=len(val_loader), leave=False)
             for i, batch in enumerate(val_loader):
                 x, y = batch
 
@@ -380,6 +410,16 @@ def main():
             val_loss_avg.append(np.mean(val_loss))
             val_acc_avg.append(np.mean(val_acc))
 
+            current_val_acc = val_acc_avg[-1]
+            if current_val_acc > best_val_acc:
+                if best_snapshot_path is not None:
+                    os.remove(best_snapshot_path)
+
+                best_val_acc = current_val_acc
+                best_snapshot_path = f'{args.out_dir}/model_{exp_id}_ep={epoch}_acc={best_val_acc}.pt'
+
+                torch.save(model.state_dict(), best_snapshot_path)
+
         scheduler.step()
 
     # test the model
@@ -405,11 +445,6 @@ def main():
 
     # save results
     if args.save_results:
-        exp_id = ''.join([
-            'Pretrained' if model.pretrained else 'Baseline',
-            'Attention' if model.use_attention else '',
-            'Box' if args.use_bboxes else ''
-        ])
         with open(f'{args.out_dir}/performance_{exp_id}.pkl', 'wb') as f:
             metrics = {
                 'train_loss': train_loss_avg,
