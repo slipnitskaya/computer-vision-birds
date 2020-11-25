@@ -1,6 +1,5 @@
 import os
 import copy
-import tqdm
 import torch
 import pickle
 import argparse
@@ -147,8 +146,16 @@ class ResNet50(ResNet):
     weights_loader = staticmethod(tv.models.resnet50)
 
 
+class ResNext50(ResNet):
+    weights_loader = staticmethod(tv.models.resnext50_32x4d)
+
+
 class ResNet50AttentionKD(KnowledgeDistillationMixin, ResNetAttention):
     weights_loader = staticmethod(tv.models.resnet50)
+
+
+class ResNext50AttentionKD(KnowledgeDistillationMixin, ResNetAttention):
+    weights_loader = staticmethod(tv.models.resnext50_32x4d)
 
 
 class DatasetBirds(tv.datasets.ImageFolder):
@@ -268,8 +275,8 @@ def main():
     parser.add_argument('-o', '--out-dir', default='results')
     parser.add_argument('-p', '--path-to-teacher', default=None)
     parser.add_argument('-t', '--pretrained', default=False)
-    parser.add_argument('-b', '--batch-size', default=128)
-    parser.add_argument('-e', '--num-epochs', default=1)
+    parser.add_argument('-b', '--batch-size', default=16)
+    parser.add_argument('-e', '--num-epochs', default=100)
     parser.add_argument('-w', '--num-workers', default=0)
     parser.add_argument('-B', '--use-bboxes', default=False)
     parser.add_argument('-B', '--use-kd', default=False)
@@ -280,7 +287,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     exp_id = ''.join(['Pretrained' if args.pretrained else 'Baseline', 'Box' if args.use_bboxes else ''])
-    log_interval = 20
+    log_interval = 10
     bbox_loss_alpha = 1
     kd_alpha = 0.2
 
@@ -342,24 +349,21 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
+    # train and validate the model
+    best_snapshot_path = None
+    best_val_acc = -1.0
+
     train_loss_avg = list()
     train_acc_avg = list()
     val_loss_avg = list()
     val_acc_avg = list()
-
-    # use the best model snapshot
-    best_snapshot_path = None
-    best_val_acc = -1.0
-
-    for epoch in tqdm.trange(args.num_epochs):
+    for epoch in range(args.num_epochs):
 
         # train the model
         model.train()
         train_loss = list()
         train_acc = list()
-        train_loss_per_batch = 0.0
-        bar = tqdm.tqdm(total=len(train_loader), leave=False)
-        for i, batch in enumerate(train_loader):
+        for batch in train_loader:
             x, y = batch
 
             x = x.to(device)
@@ -409,17 +413,11 @@ def main():
             loss.backward()
             optimizer.step()
 
-            train_loss_per_batch += loss.item()
-
             if args.use_bboxes:
                 acc = accuracy_score([val.item() for val in y[..., 0]],
                                      [val.item() for val in y_pred[..., :-4].argmax(dim=-1)])
             else:
                 acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
-
-            if (i + 1) % log_interval == 0:
-                bar.set_description('Train loss={:.3f}'.format(loss.item()), True)
-                bar.update()
 
             train_loss.append(loss.item())
             train_acc.append(acc)
@@ -431,9 +429,8 @@ def main():
         model.eval()
         val_loss = list()
         val_acc = list()
-        bar = tqdm.tqdm(total=len(val_loader), leave=False)
         with torch.no_grad():
-            for i, batch in enumerate(val_loader):
+            for batch in val_loader:
                 x, y = batch
 
                 x = x.to(device)
@@ -450,10 +447,6 @@ def main():
                 else:
                     loss = F.cross_entropy(y_pred, y)
                     acc = accuracy_score([val.item() for val in y], [val.item() for val in y_pred.argmax(dim=-1)])
-
-                if (i + 1) % log_interval == 0:
-                    bar.set_description('Valid loss={:.3f}'.format(loss.item()), True)
-                    bar.update()
 
                 val_loss.append(loss.item())
                 val_acc.append(acc)
@@ -473,6 +466,12 @@ def main():
 
         scheduler.step()
 
+        # print performance metrics
+        if (epoch == 0) or ((epoch + 1) % log_interval == 0):
+            print('Epoch {} |> Train. loss: {:.4f} | Val. loss: {:.4f}'.format(
+                epoch + 1, np.mean(train_loss), np.mean(val_loss))
+            )
+    # use the best model snapshot
     if args.use_snapbest and best_snapshot_path is not None:
         state_dict = torch.load(best_snapshot_path, map_location=device)
         model.load_state_dict(state_dict)
@@ -481,7 +480,7 @@ def main():
     true = list()
     pred = list()
     with torch.no_grad():
-        for i, batch in enumerate(tqdm.tqdm(test_loader, leave=False)):
+        for batch in test_loader:
             x, y = batch
 
             x = x.to(device)
@@ -496,7 +495,7 @@ def main():
             true.extend([val.item() for val in y])
             pred.extend([val.item() for val in y_pred.argmax(dim=-1)])
 
-    print('Test accuracy: {:.3f}'.format(accuracy_score(true, pred)))
+    print('\nTest accuracy: {:.3f}'.format(accuracy_score(true, pred)))
 
     # save results
     if args.save_results:
