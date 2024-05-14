@@ -1,7 +1,7 @@
-# Bird by Bird using Deep Learning
-## Tutorial on Advanced Classification of Bird Species
+# Bird by Bird AI Tutorials
+## Python tutorials on computer vision for classification of bird species
 
-This repository contains materials accompanying a serie of articles “Bird by Bird using Deep Learning” coupled with interactive Python notebooks and published by Sofya Lipnitskaya on [Medium](https://medium.com/@slipnitskaya). 
+This repository contains materials accompanying a series of articles “Bird by Bird Tech” published on [Medium](https://medium.com/@slipnitskaya). 
 
 ### Motivation
 Here, we are going to tackle such an established problem in computer vision as fine-grained classification of bird species. The tutorial demonstrates how to classify bird images from the Caltech-UCSD Birds-200-2011 ([CUB-200-2011](http://www.vision.caltech.edu/visipedia/CUB-200-2011.html)) dataset using [PyTorch](https://github.com/pytorch/pytorch), one of the most popular open-source frameworks for deep learning experiments.
